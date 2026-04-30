@@ -46,11 +46,27 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: ${{ runner.os }}-gradle-
 
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: app/.cxx
+          key: ${{ runner.os }}-cmake-${{ hashFiles('app/src/main/cpp/**') }}
+          restore-keys: ${{ runner.os }}-cmake-
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Set Gradle memory
+        run: |
+          mkdir -p ~/.gradle
+          echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m" >> ~/.gradle/gradle.properties
+          echo "org.gradle.parallel=false" >> ~/.gradle/gradle.properties
+          echo "org.gradle.workers.max=2" >> ~/.gradle/gradle.properties
+
       - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug --no-daemon --max-workers=2
+        env:
+          GRADLE_OPTS: "-Xmx4g"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
