@@ -1,12 +1,12 @@
 package com.lokai.app.viewmodel
 
 import android.app.Application
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
+import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
-import android.content.Context
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import com.lokai.app.data.device.DeviceDetector
 import com.lokai.app.data.models.ModelCatalog
 import com.lokai.app.model.DeviceProfile
@@ -16,14 +16,19 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-private val Context.onboardingDataStore by preferencesDataStore("onboarding")
-private val KEY_ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
+// Shared singleton DataStore accessor — avoids duplicate delegate crash with MainActivity.
+// Both MainActivity and OnboardingViewModel must use this same object.
+internal object OnboardingDataStore {
+    private val Context.store by preferencesDataStore("onboarding")
+    val KEY_DONE = booleanPreferencesKey("onboarding_done")
+    fun of(context: Context) = context.store
+}
 
 data class OnboardingState(
-    val isScanning:   Boolean      = true,
-    val scanProgress: Float        = 0f,
-    val scanLabel:    String       = "Reading hardware…",
-    val scanComplete: Boolean      = false,
+    val isScanning:   Boolean        = true,
+    val scanProgress: Float          = 0f,
+    val scanLabel:    String         = "Reading hardware…",
+    val scanComplete: Boolean        = false,
     val profile:      DeviceProfile? = null,
     val topModels:    List<ModelEntry> = emptyList()
 )
@@ -36,17 +41,12 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     private val _state = MutableStateFlow(OnboardingState())
     val state: StateFlow<OnboardingState> = _state.asStateFlow()
 
-    // ── Check if onboarding was already completed ────────────────────────────
+    val isOnboardingDone: Flow<Boolean> =
+        OnboardingDataStore.of(application).data
+            .map { it[OnboardingDataStore.KEY_DONE] ?: false }
+            .catch { emit(false) }
 
-    val isOnboardingDone: Flow<Boolean> = application.onboardingDataStore.data
-        .map { it[KEY_ONBOARDING_DONE] ?: false }
-        .catch { emit(false) }
-
-    init {
-        runScan()
-    }
-
-    // ── Animated scan sequence ───────────────────────────────────────────────
+    init { runScan() }
 
     private fun runScan() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -59,35 +59,23 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 0.90f to "Filtering compatible models…",
                 1.00f to "Done."
             )
-
             for ((progress, label) in steps) {
                 _state.update { it.copy(scanProgress = progress, scanLabel = label) }
                 delay(340)
             }
-
             val profile = detector.detect()
             val (compatible, _) = catalog.filterByRam(profile.effectiveRamGb)
-            val topModels = compatible
-                .sortedBy { it.minRamGb }
-                .take(3)
-
+            val topModels = compatible.sortedBy { it.minRamGb }.take(3)
             _state.update {
-                it.copy(
-                    isScanning   = false,
-                    scanComplete = true,
-                    profile      = profile,
-                    topModels    = topModels
-                )
+                it.copy(isScanning = false, scanComplete = true, profile = profile, topModels = topModels)
             }
         }
     }
 
-    // ── Persist onboarding completion ────────────────────────────────────────
-
     fun markOnboardingDone() {
         viewModelScope.launch {
-            getApplication<Application>().onboardingDataStore.edit { prefs ->
-                prefs[KEY_ONBOARDING_DONE] = true
+            OnboardingDataStore.of(getApplication()).edit { prefs ->
+                prefs[OnboardingDataStore.KEY_DONE] = true
             }
         }
     }
