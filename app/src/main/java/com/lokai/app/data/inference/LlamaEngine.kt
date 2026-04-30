@@ -158,9 +158,16 @@ class LlamaEngine {
         }
     }
 
+    var isLibraryLoaded = false
+        private set
+
     companion object {
         init {
-            System.loadLibrary("lokai_jni")
+            try {
+                System.loadLibrary("lokai_jni")
+            } catch (e: UnsatisfiedLinkError) {
+                android.util.Log.e("LlamaEngine", "Failed to load native library: ${e.message}")
+            }
         }
     }
 }
