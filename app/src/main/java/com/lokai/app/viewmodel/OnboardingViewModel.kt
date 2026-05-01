@@ -5,7 +5,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lokai.app.KEY_ONBOARDING_DONE
-import com.lokai.app.OnboardingDataStore
+import com.lokai.app.onboardingDataStore
 import com.lokai.app.data.device.DeviceDetector
 import com.lokai.app.data.models.ModelCatalog
 import com.lokai.app.model.DeviceProfile
@@ -33,7 +33,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     val state: StateFlow<OnboardingState> = _state.asStateFlow()
 
     val isOnboardingDone: Flow<Boolean> =
-        OnboardingDataStore.get(application).data
+        application.onboardingDataStore.data
             .map { it[KEY_ONBOARDING_DONE] ?: false }
             .catch { emit(false) }
 
@@ -70,7 +70,7 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
 
     fun markOnboardingDone() {
         viewModelScope.launch {
-            OnboardingDataStore.get(getApplication()).edit { prefs ->
+            getApplication<Application>().onboardingDataStore.edit { prefs ->
                 prefs[KEY_ONBOARDING_DONE] = true
             }
         }

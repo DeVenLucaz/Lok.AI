@@ -28,12 +28,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun LokaiRoot() {
     val context = LocalContext.current
-
     var resolved       by remember { mutableStateOf(false) }
     var showOnboarding by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        OnboardingDataStore.get(context).data
+        context.onboardingDataStore.data
             .map { it[KEY_ONBOARDING_DONE] ?: false }
             .catch { emit(false) }
             .collect { done ->
