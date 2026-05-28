@@ -35,7 +35,8 @@ class ModelViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             _isLoading.value = true
             val profile   = detector.detect()
-            deviceRamGb   = profile.effectiveRamGb
+            // FIX: use physical-biased RAM for filtering (same logic as ModelRepository)
+            deviceRamGb   = profile.totalRamGb + (profile.swapGb * 0.2f)
             _result.value = repository.getModelsForDevice(profile)
             _isLoading.value = false
         }
