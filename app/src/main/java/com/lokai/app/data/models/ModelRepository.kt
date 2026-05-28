@@ -18,7 +18,14 @@ class ModelRepository(private val catalog: ModelCatalog) {
      * Incompatible models are sorted by minRamGb ascending (closest to fitting first).
      */
     fun getModelsForDevice(profile: DeviceProfile): ModelResult {
-        val (compatible, incompatible) = catalog.filterByRam(profile.effectiveRamGb)
+        // FIX: Filter by physical RAM only — llama.cpp loads model weights into RAM
+        // and swap/zram is too slow for LLM inference on Android. Using effectiveRamGb
+        // (which includes swap) caused oversized models to appear as "Compatible".
+        // We add a small 0.2× swap bonus (vs the old 0.6×) to allow models that
+        // only slightly exceed physical RAM and can use a little zram for KV cache.
+        val filterRamGb = profile.totalRamGb + (profile.swapGb * 0.2f)
+
+        val (compatible, incompatible) = catalog.filterByRam(filterRamGb)
 
         val sortedCompatible = compatible.sortedWith(
             compareByDescending<ModelEntry> { it.thinkingTrained }
@@ -28,9 +35,10 @@ class ModelRepository(private val catalog: ModelCatalog) {
         val sortedIncompatible = incompatible.sortedBy { it.minRamGb }
 
         return ModelResult(
-            compatible   = sortedCompatible,
-            incompatible = sortedIncompatible,
-            deviceRamGb  = profile.effectiveRamGb
+            compatible        = sortedCompatible,
+            incompatible      = sortedIncompatible,
+            deviceRamGb       = profile.effectiveRamGb,   // kept for UI display
+            filterRamGb       = filterRamGb               // actual value used for filtering
         )
     }
 
@@ -43,6 +51,8 @@ class ModelRepository(private val catalog: ModelCatalog) {
 data class ModelResult(
     val compatible:   List<ModelEntry>,
     val incompatible: List<ModelEntry>,
-    /** The effective RAM used for filtering */
-    val deviceRamGb:  Float
+    /** Effective RAM (total + swap×0.6) — shown in UI as device capability */
+    val deviceRamGb:  Float,
+    /** Physical-biased RAM (total + swap×0.2) — actually used for filtering */
+    val filterRamGb:  Float = deviceRamGb
 )
