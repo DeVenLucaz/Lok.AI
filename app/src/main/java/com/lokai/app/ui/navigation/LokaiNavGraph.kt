@@ -55,12 +55,10 @@ private sealed class OverlayScreen {
 @Composable
 fun LokaiNavGraph() {
     // FIX: store route as String to avoid NavTab null reference during
-    // recomposition after onboarding→main transition. Look up the object
-    // only when needed so it's always resolved from the singleton objects.
-    var currentRoute  by remember { mutableStateOf("my_models") }
-    var overlay       by remember { mutableStateOf<OverlayScreen>(OverlayScreen.None) }
-
-    val currentTab: NavTab get() = NavTab.fromRoute(currentRoute)
+    // recomposition after onboarding->main transition. Resolve the tab
+    // object via fromRoute() inline — never stored as nullable state.
+    var currentRoute by remember { mutableStateOf("my_models") }
+    var overlay      by remember { mutableStateOf<OverlayScreen>(OverlayScreen.None) }
 
     // Shared ViewModels
     val chatVm:     ChatViewModel     = viewModel()
@@ -73,7 +71,6 @@ fun LokaiNavGraph() {
 
     when (val o = overlay) {
         is OverlayScreen.CreateAgent -> {
-            // Need downloaded models for the model picker
             val dlState by downloadVm.uiState.collectAsStateWithLifecycle()
             AgentCreateScreen(
                 downloadedModels = dlState.downloadedModels,
@@ -139,7 +136,7 @@ fun LokaiNavGraph() {
         }
     ) { innerPadding ->
         val modifier = Modifier.padding(innerPadding)
-        when (currentTab) {
+        when (NavTab.fromRoute(currentRoute)) {
             NavTab.Chat -> ChatScreen(
                 chatVm       = chatVm,
                 initialModel = pendingChatModel.also { pendingChatModel = null }
