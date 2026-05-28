@@ -31,13 +31,22 @@ private val TextSubtle  = Color(0xFF666666)
 @Composable
 fun SettingsScreen(
     vm:             SettingsViewModel = viewModel(),
-    onViewSessions: () -> Unit        = {}
+    onViewSessions: () -> Unit        = {},
+    // FIX: accept innerPadding from the Scaffold so the nav bar height is
+    // accounted for. LokaiNavGraph now passes this down.
+    innerPadding:   PaddingValues     = PaddingValues()
 ) {
     val s by vm.settings.collectAsStateWithLifecycle()
 
     Surface(modifier = Modifier.fillMaxSize(), color = BgPage) {
         LazyColumn(
-            contentPadding      = PaddingValues(horizontal = 16.dp, vertical = 20.dp),
+            // FIX: use innerPadding.calculateBottomPadding() so the list
+            // scrolls fully above the bottom nav bar (was getting clipped).
+            contentPadding = PaddingValues(
+                horizontal = 16.dp,
+                top        = 20.dp,
+                bottom     = 20.dp + innerPadding.calculateBottomPadding()
+            ),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
