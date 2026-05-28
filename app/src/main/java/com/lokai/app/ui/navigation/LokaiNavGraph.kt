@@ -37,7 +37,9 @@ private sealed class NavTab(
     object Settings  : NavTab("settings",  "Settings",  Icons.Filled.Settings)
 
     companion object {
-        val all = listOf(Chat, Agents, MyModels, Models, Device, Settings)
+        val all = listOf<NavTab>(Chat, Agents, MyModels, Models, Device, Settings)
+        fun fromRoute(route: String): NavTab =
+            all.firstOrNull { it.route == route } ?: MyModels
     }
 }
 
@@ -52,8 +54,13 @@ private sealed class OverlayScreen {
 
 @Composable
 fun LokaiNavGraph() {
-    var currentTab    by remember { mutableStateOf<NavTab>(NavTab.MyModels) }
+    // FIX: store route as String to avoid NavTab null reference during
+    // recomposition after onboarding→main transition. Look up the object
+    // only when needed so it's always resolved from the singleton objects.
+    var currentRoute  by remember { mutableStateOf("my_models") }
     var overlay       by remember { mutableStateOf<OverlayScreen>(OverlayScreen.None) }
+
+    val currentTab: NavTab get() = NavTab.fromRoute(currentRoute)
 
     // Shared ViewModels
     val chatVm:     ChatViewModel     = viewModel()
@@ -72,8 +79,8 @@ fun LokaiNavGraph() {
                 downloadedModels = dlState.downloadedModels,
                 onBack           = { overlay = OverlayScreen.None },
                 onCreated        = {
-                    overlay    = OverlayScreen.None
-                    currentTab = NavTab.Agents
+                    overlay      = OverlayScreen.None
+                    currentRoute = "agents"
                 }
             )
             return
@@ -93,7 +100,7 @@ fun LokaiNavGraph() {
         }
         is OverlayScreen.Sessions -> {
             SessionsListScreen(
-                onOpenRegular = { _: ChatSession  -> overlay = OverlayScreen.None /* resume via ChatVm */ },
+                onOpenRegular = { _: ChatSession  -> overlay = OverlayScreen.None },
                 onOpenAgent   = { _: AgentSession -> overlay = OverlayScreen.None }
             )
             return
@@ -108,10 +115,10 @@ fun LokaiNavGraph() {
         bottomBar = {
             NavigationBar(containerColor = BgNavBar, tonalElevation = 0.dp) {
                 NavTab.all.forEach { tab ->
-                    val selected = currentTab == tab
+                    val selected = currentRoute == tab.route
                     NavigationBarItem(
                         selected = selected,
-                        onClick  = { currentTab = tab },
+                        onClick  = { currentRoute = tab.route },
                         icon     = {
                             Icon(
                                 imageVector        = tab.icon,
@@ -140,7 +147,6 @@ fun LokaiNavGraph() {
             NavTab.Agents -> AgentListScreen(
                 onCreateAgent = { overlay = OverlayScreen.CreateAgent },
                 onOpenAgent   = { agent ->
-                    // Find the downloaded model path for this agent
                     val dlState = downloadVm.uiState.value
                     val modelPath = dlState.downloadedModels
                         .firstOrNull { it.modelId == agent.modelId }?.localPath
@@ -152,12 +158,10 @@ fun LokaiNavGraph() {
                 downloadVm   = downloadVm,
                 onChatClick  = { model ->
                     pendingChatModel = model
-                    currentTab = NavTab.Chat
+                    currentRoute = "chat"
                 },
-                onAgentClick = { model ->
-                    // Navigate to AgentCreateScreen with this model pre-selected
+                onAgentClick = { _ ->
                     overlay = OverlayScreen.CreateAgent
-                    // AgentCreateScreen will pick up the model via its own state
                 }
             )
             NavTab.Models   -> ModelBrowserScreen(
@@ -170,4 +174,3 @@ fun LokaiNavGraph() {
         }
     }
 }
-
