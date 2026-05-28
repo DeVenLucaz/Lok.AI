@@ -166,7 +166,8 @@ fun LokaiNavGraph() {
             )
             NavTab.Device   -> DeviceScreen()
             NavTab.Settings -> SettingsScreen(
-                onViewSessions = { overlay = OverlayScreen.Sessions }
+                onViewSessions = { overlay = OverlayScreen.Sessions },
+                innerPadding   = innerPadding   // FIX: pass so bottom nav bar doesn't clip content
             )
         }
     }
