@@ -55,7 +55,9 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
                 delay(340)
             }
             val profile = detector.detect()
-            val (compatible, _) = catalog.filterByRam(profile.effectiveRamGb)
+            // FIX: use same physical-biased filter as ModelRepository (total + swap×0.2)
+            val filterRam = profile.totalRamGb + (profile.swapGb * 0.2f)
+            val (compatible, _) = catalog.filterByRam(filterRam)
             val topModels = compatible.sortedBy { it.minRamGb }.take(3)
             _state.update {
                 it.copy(
