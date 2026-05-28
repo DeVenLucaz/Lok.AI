@@ -43,9 +43,10 @@ fun SettingsScreen(
             // FIX: use innerPadding.calculateBottomPadding() so the list
             // scrolls fully above the bottom nav bar (was getting clipped).
             contentPadding = PaddingValues(
-                horizontal = 16.dp,
-                top        = 20.dp,
-                bottom     = 20.dp + innerPadding.calculateBottomPadding()
+                start  = 16.dp,
+                top    = 20.dp,
+                end    = 16.dp,
+                bottom = 20.dp + innerPadding.calculateBottomPadding()
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
