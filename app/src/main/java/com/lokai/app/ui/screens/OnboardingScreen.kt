@@ -86,9 +86,8 @@ fun OnboardingScreen(
                     models   = state.topModels,
                     tier     = state.profile?.tier ?: DeviceTier.MID,
                     onFinish = {
-                        vm.markOnboardingDone()
-                        onFinished()
-                    }
+    vm.markOnboardingDone { onFinished() }
+}
                 )
             }
         }
