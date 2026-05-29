@@ -10,7 +10,7 @@ import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lokai.app.data.inference.InferenceMode
-import com.lokai.app.data.inference.LlamaEngine
+import com.lokai.app.data.inference.LlamaEngineHolder
 import com.lokai.app.data.session.SessionRepository
 import com.lokai.app.data.settings.LokaiSettings
 import com.lokai.app.data.settings.SettingsRepository
@@ -42,24 +42,26 @@ data class ChatUiState(
     val showModelPicker:       Boolean         = false,
     val contextUsed:           Int             = 0,
     val contextMax:            Int             = 0,
-    val nativeLibraryMissing:  Boolean         = false   // true when lokai_jni.so failed to load
+    val nativeLibraryMissing:  Boolean         = false
 )
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val engine     = LlamaEngine()
-    private val sessionRepo = SessionRepository(application)
+    // FIX (Bug 4): Use shared singleton instead of `LlamaEngine()`.
+    // Creating a second LlamaEngine instance while AgentViewModel has one loaded
+    // causes both to manipulate the same native llama.cpp global state → crash.
+    private val engine      get() = LlamaEngineHolder.engine
+    private val sessionRepo  = SessionRepository(application)
     private val settingsRepo = SettingsRepository(application)
-    private val activityMgr = application.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    private val activityMgr  = application.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
-    private var settings: LokaiSettings = LokaiSettings()
-    private var inferenceJob: Job? = null
-    private var ramMonitorJob: Job? = null
-    private var sessionId: String? = null
-    private var autoSaveCounter = 0
+    private var settings:      LokaiSettings = LokaiSettings()
+    private var inferenceJob:  Job?          = null
+    private var ramMonitorJob: Job?          = null
+    private var sessionId:     String?       = null
 
     // Battery receiver
     private val batteryReceiver = object : BroadcastReceiver() {
@@ -75,35 +77,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
-        // Detect missing native library immediately so the UI can show a helpful error
-        if (!LlamaEngine.isLibraryLoaded) {
+        if (!com.lokai.app.data.inference.LlamaEngine.isLibraryLoaded) {
             _uiState.update { it.copy(nativeLibraryMissing = true) }
         }
         viewModelScope.launch {
             settingsRepo.settings.collect { s ->
                 settings = s
-                // Re-evaluate battery warning threshold with current %
                 _uiState.update { it.copy(isBatteryLow = it.batteryPct <= s.batteryWarnPercent) }
             }
         }
         registerBatteryReceiver()
     }
 
-    // ─── Model Loading ────────────────────────────────────────────────────────
+    // ─── Model loading ────────────────────────────────────────────────────────
 
-    /**
-     * Load [model] into the inference engine.
-     * Unloads any currently-loaded model first.
-     * Creates a new ChatSession for this model.
-     */
     fun loadModel(model: DownloadedModel) {
         if (_uiState.value.loadingModel) return
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { it.copy(loadingModel = true, loadError = null) }
 
-            // Unload previous
-            if (_uiState.value.isModelLoaded) {
+            // FIX (Bug 4): Unload the shared engine before loading a new model.
+            // AgentViewModel may have loaded its own model into the same engine.
+            if (_uiState.value.isModelLoaded || LlamaEngineHolder.isLoaded) {
                 engine.unloadModel()
+                LlamaEngineHolder.isLoaded = false
                 _uiState.update { it.copy(isModelLoaded = false) }
             }
 
@@ -117,7 +114,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             if (ok) {
-                // Determine default mode for this model
+                LlamaEngineHolder.isLoaded = true
                 val mode = when {
                     model.thinkingTrained -> InferenceMode.PRECISE
                     else                  -> settings.defaultMode.let {
@@ -125,8 +122,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 val session = ChatSession(
-                    modelId   = model.modelId,
-                    modelName = model.name,
+                    modelId       = model.modelId,
+                    modelName     = model.name,
                     inferenceMode = mode
                 )
                 sessionId = session.id
@@ -143,6 +140,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 ) }
                 startRamMonitor()
             } else {
+                LlamaEngineHolder.isLoaded = false
                 _uiState.update { it.copy(
                     loadingModel = false,
                     loadError    = "Failed to load model. It may be corrupted or require more RAM."
@@ -151,20 +149,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Resume an existing session (model must already be loaded). */
     fun resumeSession(session: ChatSession) {
         sessionId = session.id
-        _uiState.update { it.copy(
-            session       = session,
-            inferenceMode = session.inferenceMode
-        ) }
+        _uiState.update { it.copy(session = session, inferenceMode = session.inferenceMode) }
     }
 
     // ─── Mode switching ───────────────────────────────────────────────────────
 
     fun setMode(mode: InferenceMode) {
-        val state = _uiState.value
-        // Show tooltip once per mode type
         val showTooltip = when (mode) {
             InferenceMode.PRECISE -> !settings.tooltipPreciseSeen
             InferenceMode.FOCUSED -> !settings.tooltipFocusedSeen
@@ -175,7 +167,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             showModeTooltip = showTooltip,
             tooltipMode     = if (showTooltip) mode else null
         ) }
-        // Persist mode to session
         viewModelScope.launch {
             sessionId?.let { id -> sessionRepo.updateMode(id, mode) }
         }
@@ -201,11 +192,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.isGenerating) return
         if (userText.isBlank()) return
 
-        val currentState = _uiState.value
+        val currentState   = _uiState.value
         val currentSession = currentState.session ?: return
-        val mode = currentState.inferenceMode
+        val mode           = currentState.inferenceMode
 
-        // Add user message immediately
         val userMsg  = ChatMessage(role = "user", content = userText.trim())
         val messages = currentSession.messages + userMsg
 
@@ -221,15 +211,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val log     = mutableListOf<ThinkingLog>()
 
             fun addLog(msg: String) {
-                val entry = ThinkingLog(message = msg)
-                log.add(entry)
+                log.add(ThinkingLog(message = msg))
                 _uiState.update { s -> s.copy(streamingLog = log.toList()) }
             }
 
             addLog("Mode: ${mode.label}")
             addLog("Context: ${engine.getContextUsed()} / ${engine.getContextMax()} tokens")
 
-            // Build prompt with context trimming
             val prompt = buildPrompt(messages, mode, settings)
             addLog("Generating response...")
 
@@ -246,9 +234,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update { it.copy(streamingText = responseBuffer.toString()) }
                 }
 
-                val elapsedMs  = System.currentTimeMillis() - startMs
-                val elapsedSec = elapsedMs / 1000f
-                addLog("Done in %.1fs".format(elapsedSec))
+                val elapsedMs = System.currentTimeMillis() - startMs
+                addLog("Done in %.1fs".format(elapsedMs / 1000f))
 
                 val assistantMsg = ChatMessage(
                     role        = "assistant",
@@ -257,7 +244,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     thinkingMs  = elapsedMs
                 )
 
-                val finalMessages = messages + assistantMsg
+                val finalMessages  = messages + assistantMsg
                 val updatedSession = currentSession.copy(
                     messages  = finalMessages,
                     updatedAt = System.currentTimeMillis()
@@ -272,19 +259,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     contextMax    = engine.getContextMax()
                 ) }
 
-                // Auto-save every 5 exchanges
+                // FIX (Bug 9): Save after every exchange. The previous counter
+                // (save at 1, then every 5) could lose up to 4 message pairs if
+                // the app was killed between saves. Each completed exchange is
+                // cheap to persist and the user expects history to be reliable.
                 if (settings.autoSaveSessions) {
-                    autoSaveCounter++
-                    if (autoSaveCounter % 5 == 0 || autoSaveCounter == 1) {
-                        sessionRepo.save(updatedSession)
-                    }
+                    sessionRepo.save(updatedSession)
                 }
 
-                // Update benchmark
                 updateBenchmark(responseBuffer.toString(), elapsedMs)
 
             } catch (e: CancellationException) {
-                // User stopped — commit partial response if any
                 val partial = responseBuffer.toString().trim()
                 if (partial.isNotEmpty()) {
                     val assistantMsg = ChatMessage(
@@ -300,6 +285,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         streamingText = "",
                         streamingLog  = emptyList()
                     ) }
+                    // FIX (Bug 9): also save stopped responses
+                    if (settings.autoSaveSessions) {
+                        sessionRepo.save(updatedSession)
+                    }
                 } else {
                     _uiState.update { it.copy(
                         isGenerating  = false,
@@ -325,9 +314,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // ─── Model picker ─────────────────────────────────────────────────────────
 
-    fun showModelPicker()  = _uiState.update { it.copy(showModelPicker = true)  }
+    fun showModelPicker()    = _uiState.update { it.copy(showModelPicker = true) }
     fun dismissModelPicker() = _uiState.update { it.copy(showModelPicker = false) }
-    fun clearLoadError() = _uiState.update { it.copy(loadError = null) }
+    fun clearLoadError()     = _uiState.update { it.copy(loadError = null) }
 
     // ─── Export ───────────────────────────────────────────────────────────────
 
@@ -336,7 +325,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return SessionRepository(getApplication()).buildExportIntent(session)
     }
 
-    // ─── RAM monitor ─────────────────────────────────────────────────────────
+    // ─── RAM monitor ──────────────────────────────────────────────────────────
 
     private fun startRamMonitor() {
         ramMonitorJob?.cancel()
@@ -350,20 +339,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────────────────
+    // ─── Helpers ──────────────────────────────────────────────────────────────
 
-    /**
-     * Assembles the full prompt from conversation history.
-     * Trims oldest turns when context reaches 80% to preserve first exchange.
-     */
     private fun buildPrompt(
         messages: List<ChatMessage>,
-        mode: InferenceMode,
+        mode:     InferenceMode,
         settings: LokaiSettings
     ): String {
         val sb = StringBuilder()
 
-        // System prompt
         val systemPrompt = when (mode) {
             InferenceMode.FOCUSED ->
                 "Think step by step. Be precise and careful. If unsure, say so.\n\n" +
@@ -376,31 +360,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             sb.appendLine("<|end|>")
         }
 
-        // Context trimming: estimate token usage, drop oldest turns if >80%
         val maxCtx        = engine.getContextMax().takeIf { it > 0 } ?: settings.contextSize
         val trimThreshold = (maxCtx * 0.8).toInt()
-
         fun estimateTokens(text: String) = (text.length / 4).coerceAtLeast(1)
 
-        var workingMessages = messages.toMutableList()
-        // Always preserve first exchange (index 0 user, 1 assistant)
-        val firstExchange = workingMessages.take(2)
-        val rest          = if (workingMessages.size > 2) workingMessages.drop(2).toMutableList()
-                            else mutableListOf()
+        val workingMessages = messages.toMutableList()
+        val firstExchange   = workingMessages.take(2)
+        val rest            = if (workingMessages.size > 2) workingMessages.drop(2).toMutableList()
+                              else mutableListOf()
 
-        // Trim from the oldest of the non-first-exchange messages
         var estimate = (firstExchange + rest).sumOf { estimateTokens(it.content) }
         while (estimate > trimThreshold && rest.size > 0) {
             rest.removeAt(0)
-            if (rest.isNotEmpty()) rest.removeAt(0) // remove in pairs (user+assistant)
+            if (rest.isNotEmpty()) rest.removeAt(0)
             estimate = (firstExchange + rest).sumOf { estimateTokens(it.content) }
         }
-        workingMessages = (firstExchange + rest).toMutableList()
 
-        // Format as chat turns
-        for (msg in workingMessages) {
+        for (msg in firstExchange + rest) {
             when (msg.role) {
-                "user"      -> { sb.appendLine("<|user|>"); sb.appendLine(msg.content); sb.appendLine("<|end|>") }
+                "user"      -> { sb.appendLine("<|user|>");      sb.appendLine(msg.content); sb.appendLine("<|end|>") }
                 "assistant" -> { sb.appendLine("<|assistant|>"); sb.appendLine(msg.content); sb.appendLine("<|end|>") }
             }
         }
@@ -409,15 +387,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun applyModeTemp(base: Float, mode: InferenceMode): Float = when (mode) {
-        InferenceMode.NORMAL  -> base
+        InferenceMode.NORMAL            -> base
         InferenceMode.PRECISE,
-        InferenceMode.FOCUSED -> 0.4f
+        InferenceMode.FOCUSED           -> 0.4f
     }
 
     private fun applyModeMaxTokens(base: Int, mode: InferenceMode): Int = when (mode) {
-        InferenceMode.NORMAL  -> base
+        InferenceMode.NORMAL            -> base
         InferenceMode.PRECISE,
-        InferenceMode.FOCUSED -> (base * 1.2).toInt()
+        InferenceMode.FOCUSED           -> (base * 1.2).toInt()
     }
 
     private fun updateBenchmark(response: String, elapsedMs: Long) {
@@ -425,7 +403,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val tokensPerSec = (response.length / 4f) / (elapsedMs / 1000f)
         val model = _uiState.value.currentModel ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            LokaiDatabase.getInstance(getApplication()).downloadedModelDao()
+            LokaiDatabase.getInstance(getApplication())
+                .downloadedModelDao()
                 .updateBenchmark(model.modelId, tokensPerSec)
         }
     }
@@ -433,8 +412,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun registerBatteryReceiver() {
         val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            getApplication<Application>().registerReceiver(batteryReceiver, filter,
-                Context.RECEIVER_NOT_EXPORTED)
+            getApplication<Application>().registerReceiver(
+                batteryReceiver, filter, Context.RECEIVER_NOT_EXPORTED
+            )
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             getApplication<Application>().registerReceiver(batteryReceiver, filter)
@@ -446,9 +426,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         ramMonitorJob?.cancel()
         inferenceJob?.cancel()
         try { getApplication<Application>().unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
-        viewModelScope.launch(Dispatchers.IO) { engine.unloadModel() }
+        viewModelScope.launch(Dispatchers.IO) {
+            engine.unloadModel()
+            LlamaEngineHolder.isLoaded = false
+        }
     }
 }
 
-// Keep this import visible for updateBenchmark
 private typealias LokaiDatabase = com.lokai.app.data.session.LokaiDatabase

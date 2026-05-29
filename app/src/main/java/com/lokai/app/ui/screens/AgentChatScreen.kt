@@ -324,11 +324,16 @@ private fun AgentInputBar(
     onStop:        () -> Unit
 ) {
     Surface(color = BgInput, tonalElevation = 0.dp) {
+        // FIX (Bug 8): Added imePadding() to the Row so the keyboard doesn't cover
+        // the input bar. Same root cause as ChatScreen — enableEdgeToEdge() in
+        // MainActivity makes the app draw behind system bars, requiring explicit
+        // IME inset handling here. navigationBarsPadding() is kept for gesture nav.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 10.dp)
-                .navigationBarsPadding(),
+                .navigationBarsPadding()
+                .imePadding(),
             verticalAlignment = Alignment.Bottom
         ) {
             OutlinedTextField(

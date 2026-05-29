@@ -16,14 +16,22 @@ class ModelRepository(private val catalog: ModelCatalog) {
      * (bigger = more capable within what the device handles).
      *
      * Incompatible models are sorted by minRamGb ascending (closest to fitting first).
+     *
+     * FIX (Bug 6): The filtering RAM value and the UI display RAM value were
+     * computed differently:
+     *  - ModelRepository (here) was using  profile.totalRamGb + profile.swapGb * 0.2f
+     *  - DownloadViewModel was using        profile.effectiveRamGb  (= total + swap * 0.6f)
+     *  - The Browse screen header showed   profile.effectiveRamGb  → different number
+     *
+     * Now EVERYTHING uses profile.effectiveRamGb from DeviceDetector, which after
+     * the DeviceDetector fix (Bug 5) is: physicalRamGb + swapGb * 0.2f.
+     * Single source of truth — no more inconsistencies between filter and display.
      */
     fun getModelsForDevice(profile: DeviceProfile): ModelResult {
-        // FIX: Filter by physical RAM only — llama.cpp loads model weights into RAM
-        // and swap/zram is too slow for LLM inference on Android. Using effectiveRamGb
-        // (which includes swap) caused oversized models to appear as "Compatible".
-        // We add a small 0.2× swap bonus (vs the old 0.6×) to allow models that
-        // only slightly exceed physical RAM and can use a little zram for KV cache.
-        val filterRamGb = profile.totalRamGb + (profile.swapGb * 0.2f)
+        // FIX (Bug 6): Use effectiveRamGb from DeviceDetector as the single value
+        // for both filtering and display. DeviceDetector now returns physical RAM
+        // (via ActivityManager) + 0.2× swap. No need to recalculate here.
+        val filterRamGb = profile.effectiveRamGb
 
         val (compatible, incompatible) = catalog.filterByRam(filterRamGb)
 
@@ -35,10 +43,9 @@ class ModelRepository(private val catalog: ModelCatalog) {
         val sortedIncompatible = incompatible.sortedBy { it.minRamGb }
 
         return ModelResult(
-            compatible        = sortedCompatible,
-            incompatible      = sortedIncompatible,
-            deviceRamGb       = profile.effectiveRamGb,   // kept for UI display
-            filterRamGb       = filterRamGb               // actual value used for filtering
+            compatible   = sortedCompatible,
+            incompatible = sortedIncompatible,
+            deviceRamGb  = filterRamGb   // same value for display and filtering
         )
     }
 
@@ -51,8 +58,6 @@ class ModelRepository(private val catalog: ModelCatalog) {
 data class ModelResult(
     val compatible:   List<ModelEntry>,
     val incompatible: List<ModelEntry>,
-    /** Effective RAM (total + swap×0.6) — shown in UI as device capability */
-    val deviceRamGb:  Float,
-    /** Physical-biased RAM (total + swap×0.2) — actually used for filtering */
-    val filterRamGb:  Float = deviceRamGb
+    /** Effective RAM used for filtering (physical + 0.2× swap) — also shown in UI */
+    val deviceRamGb:  Float
 )

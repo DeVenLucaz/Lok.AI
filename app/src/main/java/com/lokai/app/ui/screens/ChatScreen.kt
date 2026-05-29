@@ -273,7 +273,15 @@ private fun ChatInputBar(
     var inputText by remember { mutableStateOf("") }
 
     Surface(color = BgInputBar, tonalElevation = 0.dp) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        // FIX (Bug 3): imePadding() pushes the input bar up when the soft keyboard
+        // opens. Without this, enableEdgeToEdge() in MainActivity causes the keyboard
+        // to slide up over the input bar instead of moving it up. The Scaffold's
+        // bottomBar sits in the window insets area and needs explicit IME handling.
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .imePadding()
+        ) {
 
             // Context bar (only shown when model is loaded and context is known)
             if (contextMax > 0) {

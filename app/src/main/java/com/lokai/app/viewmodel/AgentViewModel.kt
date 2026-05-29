@@ -68,7 +68,13 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     private val agentRepo   = AgentRepository(application)
     private val settingsRepo= SettingsRepository(application)
-    private val engine      = LlamaEngine()
+
+    // FIX (Bug 4): Use LlamaEngineHolder singleton instead of creating a new
+    // LlamaEngine() instance here. When both ChatViewModel and AgentViewModel
+    // each create their own LlamaEngine(), they both call into the same native
+    // llama.cpp singleton simultaneously, causing a crash or corrupted state.
+    // All inference ViewModels must share one engine instance.
+    private val engine get() = LlamaEngineHolder.engine
 
     // ─── Agent list ───────────────────────────────────────────────────────────
 
@@ -206,6 +212,15 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                     inferenceMode = agent.inferenceMode
                 )
 
+            // FIX (Bug 4): Explicitly unload the previous model before loading the
+            // new one. Without this, if ChatViewModel already loaded a model into
+            // the shared LlamaEngine, and AgentViewModel calls loadModel() on top of
+            // it, the native llama.cpp context is in an undefined state → crash.
+            if (_chatState.value.isModelLoaded || LlamaEngineHolder.isLoaded) {
+                withContext(Dispatchers.IO) { engine.unloadModel() }
+                _chatState.update { it.copy(isModelLoaded = false) }
+            }
+
             _chatState.update {
                 it.copy(agent = agent, session = session, loadingModel = true, loadError = null)
             }
@@ -227,6 +242,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (ok) {
+                LlamaEngineHolder.isLoaded = true
                 _chatState.update {
                     it.copy(
                         isModelLoaded = true,
@@ -237,6 +253,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 agentRepo.touchLastUsed(agentId)
             } else {
+                LlamaEngineHolder.isLoaded = false
                 _chatState.update { it.copy(loadingModel = false, loadError = "Failed to load model.") }
             }
         }
@@ -349,6 +366,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                 updatedAt = System.currentTimeMillis()
             )
 
+            // FIX (Bug 9): Save after every exchange, not every 5. The original
+            // counter-based approach (save at 1, then every 5) meant up to 4
+            // message pairs could be lost if the app was killed mid-conversation.
             agentRepo.saveSession(finalSession)
 
             _chatState.update { s ->
@@ -391,9 +411,8 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         val agent = _chatState.value.agent ?: return
         val current = _chatState.value.inferenceMode
         val next = when (current) {
-            InferenceMode.NORMAL  -> if (agent.category == AgentCategory.CUSTOM)
-                                         InferenceMode.FOCUSED else InferenceMode.FOCUSED
-            InferenceMode.FOCUSED -> InferenceMode.NORMAL
+            InferenceMode.NORMAL  -> InferenceMode.FOCUSED
+            InferenceMode.FOCUSED,
             InferenceMode.PRECISE -> InferenceMode.NORMAL
         }
         _chatState.update { it.copy(inferenceMode = next) }
@@ -401,7 +420,8 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        engine.unloadModel()
+        // Note: do NOT unload the engine here — ChatViewModel may still be using it.
+        // The engine is managed globally via LlamaEngineHolder.
     }
 
     // ─── Context assembly helpers ─────────────────────────────────────────────

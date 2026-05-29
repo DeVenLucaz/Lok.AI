@@ -1,5 +1,6 @@
 package com.lokai.app.data.device
 
+import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
 import com.lokai.app.model.DeviceProfile
@@ -9,31 +10,49 @@ import java.io.File
 
 /**
  * Reads hardware information from:
- *  - /proc/meminfo   → RAM + swap
- *  - /proc/cpuinfo   → chip name, cores, arch
- *  - Android Build   → device name, Android version, API level
- *  - /dev/kgsl-3d0   → Adreno GPU detection
- *  - /dev/mali0      → Mali GPU detection
+ *  - ActivityManager         → physical RAM (FIX: replaces /proc/meminfo MemTotal which
+ *                              includes ColorOS/MIUI virtual RAM expansion, causing models
+ *                              to be shown as compatible when they physically cannot run)
+ *  - /proc/meminfo           → swap only (still accurate for zram)
+ *  - /proc/cpuinfo           → chip name, cores, arch
+ *  - Android Build           → device name, Android version, API level
+ *  - /dev/kgsl-3d0           → Adreno GPU detection
+ *  - /dev/mali0              → Mali GPU detection
  *
  * All reads are synchronous and cheap — run on IO dispatcher.
  */
 class DeviceDetector(private val context: Context) {
 
     fun detect(): DeviceProfile {
-        val memInfo   = parseMemInfo()
         val cpuInfo   = parseCpuInfo()
         val gpuVendor = detectGpu()
 
-        val totalRam     = memInfo.totalKb     / (1024f * 1024f)
-        val availableRam = memInfo.availableKb / (1024f * 1024f)
-        val swap         = memInfo.swapTotalKb / (1024f * 1024f)
-        val effectiveRam = totalRam + (swap * 0.6f)
+        // FIX: Use ActivityManager.getMemoryInfo() for physical RAM.
+        // /proc/meminfo MemTotal is unreliable on ColorOS (OPPO/Realme) and MIUI
+        // because their "RAM Expansion" / "Extended RAM" feature backs virtual RAM
+        // with UFS storage and writes it into MemTotal, making an 8 GB device
+        // report 16 GB. ActivityManager reads the hardware memory map and cannot
+        // be inflated by software RAM expansion features.
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val amInfo = ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(amInfo)
+
+        val physicalRamGb  = amInfo.totalMem  / (1024f * 1024f * 1024f)
+        val availableRamGb = amInfo.availMem  / (1024f * 1024f * 1024f)
+
+        // Still read swap from /proc/meminfo — this is always real zram, not inflated
+        val swapGb = parseSwapFromMemInfo()
+
+        // Use a conservative 0.2× swap weight: zram on Android is heavily compressed
+        // and too slow for LLM KV-cache. We give a tiny bonus for models that only
+        // barely exceed physical RAM.
+        val effectiveRamGb = physicalRamGb + (swapGb * 0.2f)
 
         return DeviceProfile(
-            totalRamGb      = totalRam,
-            availableRamGb  = availableRam,
-            swapGb          = swap,
-            effectiveRamGb  = effectiveRam,
+            totalRamGb      = physicalRamGb,
+            availableRamGb  = availableRamGb,
+            swapGb          = swapGb,
+            effectiveRamGb  = effectiveRamGb,
             chipName        = cpuInfo.chipName,
             cpuCores        = cpuInfo.cores,
             cpuArch         = cpuInfo.arch,
@@ -41,34 +60,29 @@ class DeviceDetector(private val context: Context) {
             deviceName      = "${Build.MANUFACTURER} ${Build.MODEL}".trim(),
             androidVersion  = Build.VERSION.RELEASE,
             apiLevel        = Build.VERSION.SDK_INT,
-            tier            = DeviceTier.fromEffectiveRamGb(effectiveRam)
+            tier            = DeviceTier.fromEffectiveRamGb(effectiveRamGb)
         )
     }
 
-    // ─── /proc/meminfo ────────────────────────────────────────────────────────
+    // ─── /proc/meminfo — swap only ────────────────────────────────────────────
 
-    private data class MemInfo(val totalKb: Long, val availableKb: Long, val swapTotalKb: Long)
-
-    private fun parseMemInfo(): MemInfo {
-        var total    = 0L
-        var available = 0L
-        var swapTotal = 0L
+    private fun parseSwapFromMemInfo(): Float {
+        var swapTotalKb = 0L
         try {
             File("/proc/meminfo").bufferedReader().use { reader ->
                 reader.lineSequence().forEach { line ->
-                    when {
-                        line.startsWith("MemTotal:")     -> total    = extractKb(line)
-                        line.startsWith("MemAvailable:") -> available = extractKb(line)
-                        line.startsWith("SwapTotal:")    -> swapTotal = extractKb(line)
+                    if (line.startsWith("SwapTotal:")) {
+                        swapTotalKb = extractKb(line)
+                        return@use
                     }
                 }
             }
-        } catch (_: Exception) { /* fall through with zeros */ }
-        return MemInfo(total, available, swapTotal)
+        } catch (_: Exception) { /* fall through with 0 */ }
+        return swapTotalKb / (1024f * 1024f)
     }
 
     private fun extractKb(line: String): Long {
-        // e.g. "MemTotal:        7932920 kB"
+        // e.g. "SwapTotal:       8388604 kB"
         return line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: 0L
     }
 
@@ -77,8 +91,7 @@ class DeviceDetector(private val context: Context) {
     private data class CpuInfo(val chipName: String, val cores: Int, val arch: String)
 
     private fun parseCpuInfo(): CpuInfo {
-        var hardware = ""
-        var processor = ""
+        var hardware  = ""
         var coreCount = 0
         var model     = ""
         try {
@@ -86,10 +99,9 @@ class DeviceDetector(private val context: Context) {
                 reader.lineSequence().forEach { line ->
                     val lower = line.lowercase()
                     when {
-                        lower.startsWith("hardware")  -> hardware  = line.substringAfter(":").trim()
-                        lower.startsWith("processor") -> coreCount++
-                        lower.startsWith("model name")-> model     = line.substringAfter(":").trim()
-                        lower.startsWith("processor") -> processor = line.substringAfter(":").trim()
+                        lower.startsWith("hardware")   -> hardware  = line.substringAfter(":").trim()
+                        lower.startsWith("processor")  -> coreCount++
+                        lower.startsWith("model name") -> model     = line.substringAfter(":").trim()
                     }
                 }
             }
@@ -184,15 +196,15 @@ class DeviceDetector(private val context: Context) {
 
         // ── Samsung Exynos ────────────────────────────────────────────────────
         val exynosMap = mapOf(
-            "S5E9945" to "Exynos 2500",
-            "S5E9935" to "Exynos 2400",
-            "S5E9925" to "Exynos 2200",
-            "S5E9845" to "Exynos 990",
-            "S5E9840" to "Exynos 880",
+            "S5E9945"    to "Exynos 2500",
+            "S5E9935"    to "Exynos 2400",
+            "S5E9925"    to "Exynos 2200",
+            "S5E9845"    to "Exynos 990",
+            "S5E9840"    to "Exynos 880",
             "EXYNOS2500" to "Exynos 2500",
             "EXYNOS2400" to "Exynos 2400",
             "EXYNOS2200" to "Exynos 2200",
-            "EXYNOS990" to "Exynos 990",
+            "EXYNOS990"  to "Exynos 990",
             "EXYNOS9820" to "Exynos 9820",
             "EXYNOS9810" to "Exynos 9810"
         )
@@ -204,11 +216,11 @@ class DeviceDetector(private val context: Context) {
         // ── Kirin / HiSilicon ─────────────────────────────────────────────────
         val kirinMap = mapOf(
             "KIRIN9000" to "Kirin 9000",
-            "KIRIN990" to "Kirin 990",
-            "KIRIN980" to "Kirin 980",
-            "KIRIN970" to "Kirin 970",
-            "KIRIN810" to "Kirin 810",
-            "KIRIN710" to "Kirin 710"
+            "KIRIN990"  to "Kirin 990",
+            "KIRIN980"  to "Kirin 980",
+            "KIRIN970"  to "Kirin 970",
+            "KIRIN810"  to "Kirin 810",
+            "KIRIN710"  to "Kirin 710"
         )
         for ((code, name) in kirinMap) {
             if (r.contains(code)) return name

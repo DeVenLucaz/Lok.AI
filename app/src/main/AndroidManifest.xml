@@ -20,6 +20,7 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
     <application
+        android:name=".LokaiApplication"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -30,11 +31,22 @@
         android:theme="@style/Theme.LokAI"
         android:extractNativeLibs="true">
 
+        <!--
+            FIX (Bug 3 + Bug 8): windowSoftInputMode changed from "adjustResize" to
+            "adjustNothing". The ChatScreen and AgentChatScreen now handle IME insets
+            themselves via Modifier.imePadding() on the input bar composables.
+
+            "adjustResize" combined with enableEdgeToEdge() in MainActivity causes a
+            double-adjustment — Android resizes the window AND the imePadding modifier
+            also shifts content, making the layout jump erratically on some devices
+            (especially ColorOS / MIUI). "adjustNothing" lets Compose handle all IME
+            inset adjustments cleanly via WindowInsets.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:windowSoftInputMode="adjustResize"
+            android:windowSoftInputMode="adjustNothing"
             android:theme="@style/Theme.LokAI">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

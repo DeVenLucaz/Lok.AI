@@ -25,6 +25,10 @@ class ModelViewModel(application: Application) : AndroidViewModel(application) {
     private val _hfSearchState = MutableStateFlow(HFSearchState())
     val hfSearchState: StateFlow<HFSearchState> = _hfSearchState
 
+    // FIX (Bug 6): Store effectiveRamGb from DeviceDetector.
+    // DeviceDetector now uses ActivityManager (physical RAM only) so this value
+    // is accurate regardless of ColorOS / MIUI virtual RAM expansion.
+    // All filtering, display, and HF search use this one value.
     private var deviceRamGb: Float = 4f
 
     init {
@@ -34,9 +38,10 @@ class ModelViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadModels() {
         viewModelScope.launch(Dispatchers.IO) {
             _isLoading.value = true
-            val profile   = detector.detect()
-            // FIX: use physical-biased RAM for filtering (same logic as ModelRepository)
-            deviceRamGb   = profile.totalRamGb + (profile.swapGb * 0.2f)
+            val profile  = detector.detect()
+            // FIX (Bug 6): Use profile.effectiveRamGb directly — DeviceDetector
+            // is now the single source of truth. No more local recalculation.
+            deviceRamGb  = profile.effectiveRamGb
             _result.value = repository.getModelsForDevice(profile)
             _isLoading.value = false
         }
@@ -63,10 +68,5 @@ class ModelViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
-    }
-
-    fun downloadHfModel(result: HFSearchResult) {
-        // Wires into DownloadViewModel in the calling screen
-        // Stored here for future direct integration
     }
 }
