@@ -75,6 +75,7 @@ fun AgentChatScreen(
 
     Scaffold(
         containerColor = BgPage,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             TopAppBar(
                 title = {
