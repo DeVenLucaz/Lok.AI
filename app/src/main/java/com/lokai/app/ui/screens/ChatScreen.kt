@@ -82,6 +82,7 @@ fun ChatScreen(
 
     Scaffold(
         containerColor = BgPage,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             ChatTopBar(
                 modelName    = state.currentModel?.name,
