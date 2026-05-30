@@ -75,7 +75,11 @@ fun MyModelsScreen(
 
             else -> {
                 LazyColumn(
-                    contentPadding      = PaddingValues(horizontal = 16.dp, vertical = 20.dp),
+                    contentPadding      = PaddingValues(
+                        horizontal = 16.dp,
+                        top        = 20.dp,
+                        bottom     = 20.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                    ),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     item {
