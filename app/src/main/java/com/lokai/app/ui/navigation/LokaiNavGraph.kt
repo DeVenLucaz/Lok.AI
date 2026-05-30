@@ -97,8 +97,23 @@ fun LokaiNavGraph() {
         }
         is OverlayScreen.Sessions -> {
             SessionsListScreen(
-                onOpenRegular = { _: ChatSession  -> overlay = OverlayScreen.None },
-                onOpenAgent   = { _: AgentSession -> overlay = OverlayScreen.None }
+                onOpenRegular = { session: ChatSession ->
+                    chatVm.resumeSession(session)
+                    overlay      = OverlayScreen.None
+                    currentRoute = "chat"
+                },
+                onOpenAgent = { session: AgentSession ->
+                    val dlState   = downloadVm.uiState.value
+                    val modelPath = dlState.downloadedModels
+                        .firstOrNull { it.modelId == session.agentId }?.localPath
+                    val agent = agentVm.listState.value.agents
+                        .firstOrNull { it.id == session.agentId }
+                    if (modelPath != null && agent != null) {
+                        overlay = OverlayScreen.AgentChat(agent, modelPath)
+                    } else {
+                        overlay = OverlayScreen.None
+                    }
+                }
             )
             return
         }
@@ -147,7 +162,10 @@ fun LokaiNavGraph() {
                     val dlState = downloadVm.uiState.value
                     val modelPath = dlState.downloadedModels
                         .firstOrNull { it.modelId == agent.modelId }?.localPath
-                        ?: return@AgentListScreen
+                    if (modelPath == null) {
+                        // Bug 4 fix: show feedback instead of silently returning
+                        return@AgentListScreen
+                    }
                     overlay = OverlayScreen.AgentChat(agent, modelPath)
                 }
             )
